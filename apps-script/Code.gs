@@ -16,8 +16,12 @@ const SHEET_ID = '';
 
 // رابط فورم قوقل اللي ناخذ منه الأسئلة (رابط التعديل: .../forms/d/<id>/edit).
 // لازم الحساب اللي عليه السكربت يكون «محرّر» في الفورم.
-// إذا خليته فاضي، setup() تسوي فورم تجريبي وتستخدمه.
+// تقدر تخليه فاضي وتحط الرابط من قائمة «⚙️ تجهيز» داخل الشيت.
+// إذا ما فيه رابط أبداً، التجهيز يسوي فورم تجريبي ويستخدمه.
 const FORM_URL = '';
+
+// الصفحة العامة (GitHub Pages). رابطك للناس = هذي الصفحة + ?api=<رابط النشر حقك>
+const PAGE_URL = 'https://24hmood24.github.io/branch-codes/';
 
 const CODES = 'الأكواد';
 const RESP  = 'الردود';
@@ -29,7 +33,8 @@ function ss_() {
 }
 
 function formUrl_() {
-  return FORM_URL || PropertiesService.getScriptProperties().getProperty('DEMO_FORM_URL') || '';
+  const p = PropertiesService.getScriptProperties();
+  return FORM_URL || p.getProperty('FORM_URL') || p.getProperty('DEMO_FORM_URL') || '';
 }
 
 function json_(obj) {
@@ -240,8 +245,9 @@ function setup() {
   }
   r.setFrozenRows(1);
 
-  if (!FORM_URL && !PropertiesService.getScriptProperties().getProperty('DEMO_FORM_URL')) {
+  if (!formUrl_()) {
     const f = FormApp.create('نموذج تجريبي — طلب كود');
+    f.setTitle('طلب كود');
     f.setDescription('اختر الفرع واطلب الكود، بعدين عبّ معلوماتك وأرسلها.');
     f.addTextItem().setTitle('الاسم الكامل').setRequired(true);
     f.addTextItem().setTitle('رقم الجوال').setRequired(true);
@@ -252,4 +258,86 @@ function setup() {
   }
   CacheService.getScriptCache().remove('form');
   Logger.log('الفورم المستخدم: ' + formUrl_());
+}
+
+// ===== قائمة «⚙️ تجهيز» داخل الشيت =====
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('⚙️ تجهيز')
+    .addItem('١) تجهيز وربط الفورم', 'menuSetup')
+    .addItem('٢) طريقة النشر', 'menuDeployHelp')
+    .addItem('٣) رابط الصفحة للناس', 'menuPageLink')
+    .addToUi();
+}
+
+function menuSetup() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getScriptProperties();
+  const now = formUrl_();
+  const res = ui.prompt('ربط فورم قوقل',
+    'الصق رابط فورم قوقل حقك (رابط التعديل اللي ينتهي بـ /edit).\n' +
+    'إذا خليته فاضي نسوي لك فورم تجريبي.' + (now ? '\n\nالفورم الحالي:\n' + now : ''),
+    ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const url = res.getResponseText().trim();
+  if (url) {
+    if (!/docs\.google\.com\/forms\/d\//.test(url) || /\/forms\/d\/e\//.test(url)) {
+      ui.alert('الرابط غير صحيح', 'افتح الفورم للتعديل وانسخ الرابط من شريط العنوان.\nلازم يكون فيه /forms/d/ ومو رابط المشاركة (/forms/d/e/).', ui.ButtonSet.OK);
+      return;
+    }
+    try { FormApp.openByUrl(url).getTitle(); } catch (e) {
+      ui.alert('ما قدرت أفتح الفورم', 'تأكد إن حسابك هذا «محرّر» في الفورم.\n\n' + e.message, ui.ButtonSet.OK);
+      return;
+    }
+    props.setProperty('FORM_URL', url);
+  }
+  setup();
+  const f = readForm_();
+  ui.alert('تم التجهيز ✓',
+    'الشيت فيه الحين: «الأكواد» و«الردود».\n' +
+    'الفورم: ' + (f.title || formUrl_()) + '\n' +
+    'عدد الأسئلة: ' + f.questions.filter(q => q.type !== 'عنوان').length + '\n\n' +
+    'الخطوة الجاية: ⚙️ تجهيز ← ٢) طريقة النشر', ui.ButtonSet.OK);
+}
+
+function menuDeployHelp() {
+  const edit = 'https://script.google.com/home/projects/' + ScriptApp.getScriptId() + '/edit';
+  const html = HtmlService.createHtmlOutput(
+    '<div dir="rtl" style="font-family:Tahoma,Arial;font-size:14px;line-height:1.9">' +
+    '<ol style="padding-right:18px;margin:0">' +
+    '<li>افتح المحرّر: <a href="' + edit + '" target="_blank">اضغط هنا</a> (أو Extensions ← Apps Script)</li>' +
+    '<li>فوق يمين: <b>Deploy ← New deployment</b></li>' +
+    '<li>اضغط ⚙️ جنب «Select type» واختر <b>Web app</b></li>' +
+    '<li><b>Execute as:</b> Me — <b>Who has access:</b> Anyone</li>' +
+    '<li><b>Deploy</b> ← وافق على الصلاحيات إذا طلب ← <b>Done</b></li>' +
+    '<li>ارجع للشيت: <b>⚙️ تجهيز ← ٣) رابط الصفحة للناس</b></li>' +
+    '</ol>' +
+    '<p style="color:#5f6368;font-size:12px">إذا المحرّر طلع «الصفحة غير موجودة»: المتصفح فيه أكثر من حساب قوقل — افتحه في نافذة خاصة (Incognito).</p>' +
+    '</div>').setWidth(460).setHeight(330);
+  SpreadsheetApp.getUi().showModalDialog(html, 'طريقة النشر');
+}
+
+function menuPageLink() {
+  const ui = SpreadsheetApp.getUi();
+  let api = '';
+  try { api = ScriptApp.getService().getUrl() || ''; } catch (e) {}
+  if (!/\/exec$/.test(api)) {
+    const res = ui.prompt('رابط النشر',
+      'ما لقيت رابط النشر تلقائياً.\nالصق رابط الـ Web app (ينتهي بـ /exec) من Deploy ← Manage deployments:',
+      ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() !== ui.Button.OK) return;
+    api = res.getResponseText().trim();
+    if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(api)) {
+      ui.alert('الرابط لازم يبدأ بـ https://script.google.com وينتهي بـ /exec');
+      return;
+    }
+  }
+  const link = PAGE_URL + '?api=' + encodeURIComponent(api);
+  const html = HtmlService.createHtmlOutput(
+    '<div dir="rtl" style="font-family:Tahoma,Arial;font-size:14px">' +
+    '<p>هذا رابطك، أرسله للناس:</p>' +
+    '<textarea readonly onclick="this.select()" style="width:100%;height:90px;direction:ltr;font-size:12px">' + link + '</textarea>' +
+    '<p><a href="' + link + '" target="_blank">افتح الصفحة وجرّبها</a></p>' +
+    '</div>').setWidth(460).setHeight(260);
+  ui.showModalDialog(html, 'رابط الصفحة للناس');
 }

@@ -78,6 +78,13 @@
 <script src="config.js"></script>
 <script>
   var C = window.APP_CONFIG || {};
+  // رابط خاص: ?api=<رابط النشر> — عشان أي أحد يستخدم نفس الصفحة مع شيته هو
+  (function () {
+    var m = /[?&]api=([^&#]+)/.exec(location.search);
+    if (!m) return;
+    var api = decodeURIComponent(m[1]);
+    if (/^https:\/\/script\.google\.com\/(a\/macros\/[^\/]+|macros)\/s\/[\w-]+\/exec$/.test(api)) C.API_URL = api;
+  })();
   var branches = [], questions = [], chosen = '';
   var $ = function (id) { return document.getElementById(id); };
 
