@@ -345,12 +345,6 @@ function submit(branch, answers) {
     const x = findBranch_(branch);   // يتأكد إن الكود ما انستخدم (حتى لو اثنين أرسلوا مع بعض)
     const codeVal = /^\d+$/.test(x.code) && x.code[0] !== '0' ? Number(x.code) : x.code;
 
-    const values = {};
-    qs.forEach(q => {
-      const a = answers[q.id];
-      values[norm_(q.q)] = q.type === 'ملف' ? uploadFiles_(a, x.branch, x.code) : toCell_(q, a == null ? '' : a);
-    });
-
     const ss = ss_();
     let sh = ss.getSheetByName(RESP);
     if (!sh) {
@@ -365,16 +359,27 @@ function submit(branch, answers) {
     qs.forEach(q => {
       if (head.indexOf(norm_(q.q)) < 0) {
         head.push(norm_(q.q));
+        if (head.length > sh.getMaxColumns()) sh.insertColumnsAfter(sh.getMaxColumns(), head.length - sh.getMaxColumns());
         sh.getRange(1, head.length).setValue(q.q).setFontWeight('bold');
       }
     });
 
+    // الصف الجديد — وإذا الورقة ما فيها صفوف فاضية نضيف صف
     const row = Math.max(sh.getLastRow(), 1) + 1;
-    // الصف الجديد ياخذ نفس تنسيق الصف اللي فوقه (شكل الوقت، SAR، التاريخ…)
+    if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), row - sh.getMaxRows());
+    // ياخذ نفس تنسيق الصف اللي فوقه (شكل الوقت، SAR، التاريخ…)
     if (row > 2) {
       sh.getRange(row - 1, 1, 1, head.length)
         .copyTo(sh.getRange(row, 1, 1, head.length), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
     }
+
+    // الصور ترتفع بعد ما الصف جاهز (عشان ما تبقى صور بدون صف لو صار خطأ قبل)
+    const values = {};
+    qs.forEach(q => {
+      const a = answers[q.id];
+      values[norm_(q.q)] = q.type === 'ملف' ? uploadFiles_(a, x.branch, x.code) : toCell_(q, a == null ? '' : a);
+    });
+
     head.forEach((h, i) => {
       let v;
       if (TIME_TITLE.test(h)) v = new Date();
