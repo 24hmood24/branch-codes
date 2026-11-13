@@ -5,8 +5,8 @@
  *  - الأسئلة  : من فورم قوقل المربوط بالشيت (أو FORM_URL)
  *  - الإجابات : ورقة «Responses» — كل جواب ينكتب تحت عموده (نفس عناوين الفورم)،
  *               والكود ينكتب في عمود «CODE» والفرع في عمود «BRANCH»
- *  - بعد الإرسال : حالة الكود تصير «Used» ولا أحد ياخذه لين تكتب كود جديد في C
- *                 (أول ما تعدّل C ترجع الحالة «Not used» لحالها)
+ *  - بعد الإرسال : حالة الكود تصير «Used» (علامة بس — الكود يضل شغال)
+ *                 الكود ينتهي بس إذا خانة C فاضية. أول ما تعدّل C ترجع الحالة «Not used»
  *
  * الصفحة (index.html) تكلّم هذا السكربت من برّا عن طريق رابط الـ Web app.
  */
@@ -129,14 +129,12 @@ function isHeader_(x) {
   return /^(branch|الفرع|branches|الفروع)$/i.test(x.branch) || /^(code|الكود)$/i.test(x.code);
 }
 
-function isUsed_(x) { return x.status.toLowerCase() === USED.toLowerCase(); }
 
 function findBranch_(branch) {
   const b = norm_(branch);
   const x = rows_().find(r => r.branch === b);
   if (!x) throw new Error('الفرع غير موجود');
   if (!x.code) throw new Error('ما فيه كود لهذا الفرع حالياً');
-  if (isUsed_(x)) throw new Error('كود هذا الفرع انستخدم — اطلب من الإدارة كود جديد');
   return x;
 }
 
@@ -342,7 +340,7 @@ function submit(branch, answers) {
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    const x = findBranch_(branch);   // يتأكد إن الكود ما انستخدم (حتى لو اثنين أرسلوا مع بعض)
+    const x = findBranch_(branch);   // يتأكد إن الفرع له كود
     const codeVal = /^\d+$/.test(x.code) && x.code[0] !== '0' ? Number(x.code) : x.code;
 
     const ss = ss_();
