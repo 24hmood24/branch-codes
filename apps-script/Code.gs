@@ -1,9 +1,12 @@
 /**
  * طلب كود الفروع — الجزء اللي يشتغل داخل قوقل (Apps Script)
  *
- *  - الأكواد  : من الشيت، ورقة «الأكواد»  (A الفرع | B الكود) — كود واحد ثابت لكل فرع لين تغيّره
- *  - الأسئلة  : من فورم قوقل (FORM_URL) — أي تعديل في الفورم يطلع في الصفحة خلال دقيقة
- *  - الإجابات : تنحفظ في الشيت، ورقة «الردود»  (الوقت | الفرع | الكود | عمود لكل سؤال)
+ *  - الأكواد  : ورقة «codes» — B الفرع | C الكود | D الحالة (Not used / Used)
+ *  - الأسئلة  : من فورم قوقل المربوط بالشيت (أو FORM_URL)
+ *  - الإجابات : ورقة «Responses» — كل جواب ينكتب تحت عموده (نفس عناوين الفورم)،
+ *               والكود ينكتب في عمود «CODE» والفرع في عمود «BRANCH»
+ *  - بعد الإرسال : حالة الكود تصير «Used» ولا أحد ياخذه لين تكتب كود جديد في C
+ *                 (أول ما تعدّل C ترجع الحالة «Not used» لحالها)
  *
  * الصفحة (index.html) تكلّم هذا السكربت من برّا عن طريق رابط الـ Web app.
  */
@@ -11,20 +14,35 @@
 // ===== الإعدادات =====
 
 // رقم الشيت (من رابطه: /spreadsheets/d/<هذا>/edit).
-// إذا السكربت مفتوح من داخل الشيت (Extensions ← Apps Script) تقدر تخليه فاضي.
+// إذا السكربت مفتوح من داخل الشيت (Extensions ← Apps Script) خلّه فاضي.
 const SHEET_ID = '';
 
-// رابط فورم قوقل اللي ناخذ منه الأسئلة (رابط التعديل: .../forms/d/<id>/edit).
-// لازم الحساب اللي عليه السكربت يكون «محرّر» في الفورم.
-// تقدر تخليه فاضي وتحط الرابط من قائمة «⚙️ تجهيز» داخل الشيت.
-// إذا ما فيه رابط أبداً، التجهيز يسوي فورم تجريبي ويستخدمه.
+// رابط فورم قوقل (رابط التعديل .../forms/d/<id>/edit).
+// خلّه فاضي إذا الفورم مربوط بالشيت (ردوده تنزل فيه) — ناخذه تلقائياً.
 const FORM_URL = '';
 
 // الصفحة العامة (GitHub Pages). رابطك للناس = هذي الصفحة + ?api=<رابط النشر حقك>
 const PAGE_URL = 'https://24hmood24.github.io/branch-codes/';
 
-const CODES = 'الأكواد';
-const RESP  = 'الردود';
+// شكل ورقة الأكواد
+const CODES = 'codes';          // اسم الورقة
+const COL_BRANCH = 2;           // B
+const COL_CODE   = 3;           // C
+const COL_STATUS = 4;           // D
+const USED = 'Used';
+const NOT_USED = 'Not used';
+
+// ورقة الإجابات
+const RESP = 'Responses';
+// عناوين الأعمدة اللي نعبيها تلقائياً (ونخفي أسئلتها من الصفحة)
+const CODE_TITLE   = /^\s*(code\b|الكود\s*$)/i;
+const BRANCH_TITLE = /^\s*(branch\b|الفرع\s*$)/i;
+const TIME_TITLE   = /^\s*(timestamp|الوقت|طابع زمني)\s*$/i;
+
+// الصور المرفوعة تنحفظ في هذا المجلد في Drive حق صاحب السكربت
+const UPLOAD_FOLDER = 'صور طلب كود';
+const UPLOAD_REQUIRED = true;   // سؤال رفع الملف مطلوب؟ (قوقل ما يعطينا هالمعلومة)
+const MAX_UPLOAD_MB = 10;
 
 // ===== أدوات =====
 
@@ -34,13 +52,24 @@ function ss_() {
 
 function formUrl_() {
   const p = PropertiesService.getScriptProperties();
-  return FORM_URL || p.getProperty('FORM_URL') || p.getProperty('DEMO_FORM_URL') || '';
+  let linked = '';
+  try { linked = ss_().getFormUrl() || ''; } catch (e) {}
+  if (!linked) {
+    // الرابط أحياناً على مستوى الورقة نفسها (ورقة الردود)
+    const sheets = ss_().getSheets();
+    for (let i = 0; i < sheets.length && !linked; i++) {
+      try { linked = sheets[i].getFormUrl() || ''; } catch (e) {}
+    }
+  }
+  return FORM_URL || p.getProperty('FORM_URL') || linked || '';
 }
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+function norm_(s) { return String(s == null ? '' : s).trim(); }
 
 // ===== الـ API =====
 
@@ -57,7 +86,7 @@ function doGet(e) {
   }
 }
 
-// POST {action:'submit', branch, answers:{id: جواب}} → يحفظ في ورقة الردود
+// POST {action:'submit', branch, answers:{id: جواب أو [ملفات]}} → يحفظ في Responses
 function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
@@ -73,31 +102,75 @@ function doPost(e) {
 
 // ===== الفروع والأكواد =====
 
-function rows_() {
+function codesSheet_() {
   const sh = ss_().getSheetByName(CODES);
-  if (!sh) throw new Error('ورقة «' + CODES + '» غير موجودة — شغّل setup');
-  return sh.getDataRange().getValues().slice(1)
-    .map(r => [String(r[0]).trim(), String(r[1]).trim()])
-    .filter(r => r[0]);
+  if (!sh) throw new Error('ورقة «' + CODES + '» غير موجودة');
+  return sh;
+}
+
+// كل صف: {row, branch, code, status}
+function rows_() {
+  const sh = codesSheet_();
+  const last = sh.getLastRow();
+  if (last < 1) return [];
+  const width = Math.max(COL_BRANCH, COL_CODE, COL_STATUS);
+  // صف العناوين (Branch / الفرع) ممكن يكون في أي صف فوق — نتخطاه هو واللي فوقه
+  return sh.getRange(1, 1, last, width).getValues()
+    .map((r, i) => ({
+      row: i + 1,
+      branch: norm_(r[COL_BRANCH - 1]),
+      code: norm_(r[COL_CODE - 1]),
+      status: norm_(r[COL_STATUS - 1])
+    }))
+    .filter(x => x.branch && !isHeader_(x));
+}
+
+function isHeader_(x) {
+  return /^(branch|الفرع|branches|الفروع)$/i.test(x.branch) || /^(code|الكود)$/i.test(x.code);
+}
+
+function isUsed_(x) { return x.status.toLowerCase() === USED.toLowerCase(); }
+
+function findBranch_(branch) {
+  const b = norm_(branch);
+  const x = rows_().find(r => r.branch === b);
+  if (!x) throw new Error('الفرع غير موجود');
+  if (!x.code) throw new Error('ما فيه كود لهذا الفرع حالياً');
+  if (isUsed_(x)) throw new Error('كود هذا الفرع انستخدم — اطلب من الإدارة كود جديد');
+  return x;
 }
 
 function getCode(branch) {
-  const row = rows_().find(r => r[0] === String(branch || '').trim());
-  if (!row || !row[1]) throw new Error('ما فيه كود لهذا الفرع حالياً');
-  return row[1];
+  return findBranch_(branch).code;
+}
+
+// لما أحد يعدّل الكود (عمود C) في ورقة codes ترجع الحالة «Not used»
+function onEdit(e) {
+  try {
+    const r = e.range;
+    const sh = r.getSheet();
+    if (sh.getName() !== CODES) return;
+    const c1 = r.getColumn(), c2 = c1 + r.getNumColumns() - 1;
+    if (COL_CODE < c1 || COL_CODE > c2) return;
+    for (let i = 0; i < r.getNumRows(); i++) {
+      const row = r.getRow() + i;
+      const x = { branch: norm_(sh.getRange(row, COL_BRANCH).getValue()), code: norm_(sh.getRange(row, COL_CODE).getValue()) };
+      if (x.branch && x.code && !isHeader_(x)) sh.getRange(row, COL_STATUS).setValue(NOT_USED);
+    }
+  } catch (err) {}
 }
 
 // ===== الأسئلة من فورم قوقل =====
 
 // يقرأ الفورم ويحوّل كل سؤال لشكل بسيط تفهمه الصفحة.
-// يتخزّن دقيقة وحدة عشان الصفحة تفتح بسرعة.
+// أسئلة الكود والفرع تنعلّم auto (نعبيها نحن). يتخزّن دقيقة.
 function readForm_() {
   const cache = CacheService.getScriptCache();
-  const hit = cache.get('form');
+  const hit = cache.get('form2');
   if (hit) return JSON.parse(hit);
 
   const url = formUrl_();
-  if (!url) throw new Error('ما فيه فورم — حط FORM_URL أو شغّل setup');
+  if (!url) throw new Error('ما فيه فورم — اربط فورم بالشيت أو حط FORM_URL');
   const form = FormApp.openByUrl(url);
   const T = FormApp.ItemType;
   const qs = [];
@@ -112,7 +185,8 @@ function readForm_() {
         const it = item.asTextItem();
         const phone = /جوال|هاتف|موبايل|phone|mobile/i.test(title);
         const mail = /بريد|ايميل|إيميل|email/i.test(title);
-        q = { type: phone ? 'جوال' : mail ? 'بريد' : 'نص', required: it.isRequired() };
+        const num = /amount|المبلغ|السعر|price|رقم الطلب/i.test(title);
+        q = { type: phone ? 'جوال' : mail ? 'بريد' : num ? 'رقم' : 'نص', required: it.isRequired() };
         break;
       }
       case T.PARAGRAPH_TEXT:
@@ -146,117 +220,217 @@ function readForm_() {
       case T.TIME:
         q = { type: 'وقت', required: item.asTimeItem().isRequired() };
         break;
+      case T.FILE_UPLOAD:
+        q = { type: 'ملف', required: UPLOAD_REQUIRED };
+        break;
       case T.SECTION_HEADER:
       case T.PAGE_BREAK:
         q = { type: 'عنوان', required: false };
         break;
       default:
-        q = null; // صور/فيديو/جداول: ما ندعمها
+        q = null; // جداول/صور/فيديو: ما ندعمها
     }
     if (q) {
       q.id = id; q.q = title; q.help = help || '';
       q.options = q.options || [];
+      if (CODE_TITLE.test(title)) q.auto = 'code';
+      else if (BRANCH_TITLE.test(title)) q.auto = 'branch';
       qs.push(q);
     }
   });
 
   const data = { title: form.getTitle(), description: form.getDescription(), questions: qs };
-  cache.put('form', JSON.stringify(data), 60);
+  cache.put('form2', JSON.stringify(data), 60);
   return data;
+}
+
+// تقريب اسم الفرع في ورقة codes لاسم الفرع في سؤال BRANCH حق الفورم
+// (مثلاً «Al Faisaliyah - Dammam» → «Al Faisaliah - الفيصلية»)
+function tokens_(s) {
+  return String(s).toLowerCase().replace(/[^a-z\s-]/g, ' ').split(/[\s-]+/)
+    .filter(t => t && t !== 'al' && t.length > 1);
+}
+function sim_(a, b) {
+  if (a === b) return 1;
+  const m = a.length, n = b.length, d = [];
+  for (let i = 0; i <= m; i++) { d[i] = [i]; }
+  for (let j = 1; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return 1 - d[m][n] / Math.max(m, n);
+}
+function matchOption_(branch, options) {
+  let best = '', score = 0;
+  const bt = tokens_(branch);
+  options.forEach(o => {
+    if (norm_(o) === norm_(branch)) { best = o; score = 2; return; }
+    tokens_(o).forEach(ot => bt.forEach(t => {
+      const s = sim_(t, ot);
+      if (s > score) { score = s; best = o; }
+    }));
+  });
+  return score >= 0.6 ? best : '';
 }
 
 function getStart() {
   const f = readForm_();
+  const branches = rows_().map(r => r.branch);
+  const bq = f.questions.find(q => q.auto === 'branch');
+  const branchMatch = {};
+  if (bq && bq.options.length) branches.forEach(b => { branchMatch[b] = matchOption_(b, bq.options); });
   return {
     title: f.title,
     description: f.description,
-    branches: rows_().map(r => r[0]),
-    questions: f.questions
+    branches: branches,
+    // سؤال الكود نعبيه نحن؛ سؤال الفرع يطلع (لو له خيارات) ومختار تلقائياً
+    questions: f.questions.filter(q => q.auto !== 'code' && !(q.auto === 'branch' && !q.options.length)),
+    branchMatch: branchMatch
   };
 }
 
 // ===== حفظ الإجابات =====
 
+function uploadFiles_(files, branch, code) {
+  if (!Array.isArray(files) || !files.length) return '';
+  let total = 0;
+  const it = DriveApp.getFoldersByName(UPLOAD_FOLDER);
+  const folder = it.hasNext() ? it.next() : DriveApp.createFolder(UPLOAD_FOLDER);
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmmss');
+  return files.slice(0, 5).map((f, i) => {
+    const type = String(f.type || '');
+    if (!/^image\/|^application\/pdf$/.test(type)) throw new Error('نوع الملف غير مدعوم (صور أو PDF بس)');
+    const bytes = Utilities.base64Decode(String(f.data || ''));
+    total += bytes.length;
+    if (total > MAX_UPLOAD_MB * 1024 * 1024) throw new Error('حجم الملفات كبير');
+    const ext = type === 'application/pdf' ? 'pdf' : (type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+    const name = [stamp, branch, code, i + 1].join('_').replace(/[\\/:*?"<>|]/g, '-') + '.' + ext;
+    return folder.createFile(Utilities.newBlob(bytes, type, name)).getUrl();
+  }).join(', ');
+}
+
+function toCell_(q, v) {
+  if (q.type === 'تاريخ' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    const p = v.split('-').map(Number);
+    return new Date(p[0], p[1] - 1, p[2]);
+  }
+  if (q.type === 'رقم' && /^-?(0|[1-9]\d*)(\.\d+)?$/.test(v)) return Number(v);
+  v = String(v).slice(0, 2000);
+  if (/^[=+\-@0]/.test(v)) v = "'" + v; // يحفظ الصفر في أول الجوال ويمنع المعادلات
+  return v;
+}
+
 function submit(branch, answers) {
-  const row = rows_().find(r => r[0] === String(branch || '').trim());
-  if (!row) throw new Error('الفرع غير موجود');
   answers = answers || {};
-  const qs = readForm_().questions.filter(q => q.type !== 'عنوان');
+  const all = readForm_().questions;
+  const bq = all.find(q => q.auto === 'branch' && q.options.length);
+  const qs = all.filter(q => !q.auto && q.type !== 'عنوان');
+  // اسم الفرع اللي ينكتب في Responses = اختياره من سؤال BRANCH (نفس أسماء الفورم)
+  let branchAnswer = '';
+  if (bq) {
+    branchAnswer = norm_(answers[bq.id]);
+    if (bq.options.indexOf(branchAnswer) < 0) {
+      if (bq.required || !branchAnswer) throw new Error('اختر: ' + bq.q);
+    }
+  }
 
   qs.forEach(q => {
-    if (q.required && !String(answers[q.id] || '').trim()) throw new Error('عبّ: ' + q.q);
+    const a = answers[q.id];
+    const empty = q.type === 'ملف' ? !(Array.isArray(a) && a.length) : !norm_(a);
+    if (q.required && empty) throw new Error('عبّ: ' + q.q);
   });
 
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    const ss = ss_();
-    const sh = ss.getSheetByName(RESP) || ss.insertSheet(RESP);
-    let head = sh.getLastRow() > 0 && sh.getLastColumn() > 0
-      ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String)
-      : [];
-    while (head.length && !head[head.length - 1]) head.pop();
-    if (!head.length) head = ['الوقت', 'الفرع', 'الكود'];
-    qs.forEach(q => { if (head.indexOf(q.q) < 0) head.push(q.q); }); // سؤال جديد = عمود جديد
-    sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold').setBackground('#ede7f6');
-    sh.setFrozenRows(1);
-    sh.setRightToLeft(true);
+    const x = findBranch_(branch);   // يتأكد إن الكود ما انستخدم (حتى لو اثنين أرسلوا مع بعض)
+    const codeVal = /^\d+$/.test(x.code) && x.code[0] !== '0' ? Number(x.code) : x.code;
 
-    const byTitle = {};
-    qs.forEach(q => { byTitle[q.q] = answers[q.id]; });
-    const vals = head.map(h => {
-      if (h === 'الوقت') return new Date();
-      if (h === 'الفرع') return row[0];
-      if (h === 'الكود') return row[1];
-      let v = String(byTitle[h] == null ? '' : byTitle[h]).slice(0, 2000);
-      if (/^[=+\-@0]/.test(v)) v = "'" + v; // يحفظ الصفر في أول الجوال ويمنع المعادلات
-      return v;
+    const values = {};
+    qs.forEach(q => {
+      const a = answers[q.id];
+      values[norm_(q.q)] = q.type === 'ملف' ? uploadFiles_(a, x.branch, x.code) : toCell_(q, a == null ? '' : a);
     });
-    sh.appendRow(vals);
+
+    const ss = ss_();
+    let sh = ss.getSheetByName(RESP);
+    if (!sh) {
+      sh = ss.insertSheet(RESP);
+      sh.getRange(1, 1, 1, 3).setValues([['Timestamp', 'CODE - الكود', 'BRANCH - الفرع']]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+    }
+    let head = sh.getLastColumn() > 0
+      ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(norm_)
+      : [];
+    // سؤال جديد ما له عمود → عمود جديد في الآخر
+    qs.forEach(q => {
+      if (head.indexOf(norm_(q.q)) < 0) {
+        head.push(norm_(q.q));
+        sh.getRange(1, head.length).setValue(q.q).setFontWeight('bold');
+      }
+    });
+
+    const row = Math.max(sh.getLastRow(), 1) + 1;
+    // الصف الجديد ياخذ نفس تنسيق الصف اللي فوقه (شكل الوقت، SAR، التاريخ…)
+    if (row > 2) {
+      sh.getRange(row - 1, 1, 1, head.length)
+        .copyTo(sh.getRange(row, 1, 1, head.length), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    }
+    head.forEach((h, i) => {
+      let v;
+      if (TIME_TITLE.test(h)) v = new Date();
+      else if (CODE_TITLE.test(h)) v = codeVal;
+      else if (BRANCH_TITLE.test(h)) v = branchAnswer || x.branch;
+      else if (Object.prototype.hasOwnProperty.call(values, h)) v = values[h];
+      else return; // أعمدة مو لنا (مثل Checked?) ما نلمسها
+      if (v === '' || v == null) return;
+      sh.getRange(row, i + 1).setValue(v);
+    });
+
+    // الكود صار مستخدم
+    codesSheet_().getRange(x.row, COL_STATUS).setValue(USED);
+    SpreadsheetApp.flush();
   } finally {
     lock.releaseLock();
   }
 }
 
-// ===== التجهيز (شغّلها مرة وحدة من المحرر) =====
-// تسوي ورقتين: «الأكواد» و«الردود»، وتحط فروع تجربة إذا الورقة فاضية.
-// وإذا FORM_URL فاضي تسوي فورم تجريبي وتطبع رابطه في السجل (Execution log).
+// ===== التجهيز =====
+// تسوي ورقة «codes» (إذا مو موجودة) وتربط فورم تجريبي إذا ما فيه فورم.
+// ما تلمس أي بيانات موجودة.
 function setup() {
   const ss = ss_();
-  const purple = '#ede7f6';
-
-  const c = ss.getSheetByName(CODES) || ss.insertSheet(CODES, 0);
-  c.setRightToLeft(true);
-  c.getRange('A1:B1').setValues([['الفرع', 'الكود']]).setFontWeight('bold').setBackground(purple);
-  if (c.getLastRow() < 2) {
-    c.getRange('A2:B4').setValues([
-      ['فرع تجربة 1', 'TEST-111'],
-      ['فرع تجربة 2', 'TEST-222'],
-      ['فرع تجربة 3', 'TEST-333']
+  let c = ss.getSheetByName(CODES);
+  if (!c) {
+    c = ss.insertSheet(CODES, 0);
+    c.getRange(1, COL_BRANCH, 1, 3).setValues([['Branch', 'Code', 'stats']]).setFontWeight('bold');
+    c.getRange(2, COL_BRANCH, 3, 3).setValues([
+      ['Test branch 1', '11111', NOT_USED],
+      ['Test branch 2', '22222', NOT_USED],
+      ['Test branch 3', '33333', NOT_USED]
     ]);
+    c.setFrozenRows(1);
+    c.setColumnWidth(COL_BRANCH, 200);
   }
-  c.setFrozenRows(1);
-  c.setColumnWidths(1, 2, 180);
-
-  const r = ss.getSheetByName(RESP) || ss.insertSheet(RESP, 1);
-  r.setRightToLeft(true);
-  if (r.getLastRow() < 1) {
-    r.getRange('A1:C1').setValues([['الوقت', 'الفرع', 'الكود']]).setFontWeight('bold').setBackground(purple);
-  }
-  r.setFrozenRows(1);
 
   if (!formUrl_()) {
-    const f = FormApp.create('نموذج تجريبي — طلب كود');
+    const f = FormApp.create('طلب كود');
     f.setTitle('طلب كود');
     f.setDescription('اختر الفرع واطلب الكود، بعدين عبّ معلوماتك وأرسلها.');
-    f.addTextItem().setTitle('الاسم الكامل').setRequired(true);
-    f.addTextItem().setTitle('رقم الجوال').setRequired(true);
-    f.addTextItem().setTitle('رقم الفاتورة');
-    f.addMultipleChoiceItem().setTitle('نوع الطلب').setChoiceValues(['شراء', 'استرجاع', 'استبدال']).setRequired(true);
-    f.addParagraphTextItem().setTitle('ملاحظات');
-    PropertiesService.getScriptProperties().setProperty('DEMO_FORM_URL', f.getEditUrl());
+    f.addTextItem().setTitle('CODE - الكود').setRequired(true);
+    f.addTextItem().setTitle('BRANCH - الفرع').setRequired(true);
+    f.addTextItem().setTitle('Amount - المبلغ').setRequired(true);
+    f.addMultipleChoiceItem().setTitle('reason for using the code - سبب استخدام الكود')
+      .setChoiceValues(['Cancellation - إلغاء فاتورة بالكامل', 'Modification - التعديل على الفاتورة']).setRequired(true);
+    f.addParagraphTextItem().setTitle('Note');
+    f.setDestination(FormApp.DestinationType.SPREADSHEET, ss.getId());
+    SpreadsheetApp.flush();
+    // ورقة الردود اللي سواها الفورم → نسميها Responses
+    const linked = ss.getSheets().find(s => {
+      try { return s.getFormUrl(); } catch (e) { return false; }
+    });
+    if (linked && !ss.getSheetByName(RESP)) linked.setName(RESP);
   }
-  CacheService.getScriptCache().remove('form');
+  CacheService.getScriptCache().remove('form2');
   Logger.log('الفورم المستخدم: ' + formUrl_());
 }
 
@@ -276,7 +450,7 @@ function menuSetup() {
   const now = formUrl_();
   const res = ui.prompt('ربط فورم قوقل',
     'الصق رابط فورم قوقل حقك (رابط التعديل اللي ينتهي بـ /edit).\n' +
-    'إذا خليته فاضي نسوي لك فورم تجريبي.' + (now ? '\n\nالفورم الحالي:\n' + now : ''),
+    'إذا خليته فاضي نستخدم الفورم المربوط بالشيت، أو نسوي لك فورم تجريبي.' + (now ? '\n\nالفورم الحالي:\n' + now : ''),
     ui.ButtonSet.OK_CANCEL);
   if (res.getSelectedButton() !== ui.Button.OK) return;
   const url = res.getResponseText().trim();
@@ -294,9 +468,9 @@ function menuSetup() {
   setup();
   const f = readForm_();
   ui.alert('تم التجهيز ✓',
-    'الشيت فيه الحين: «الأكواد» و«الردود».\n' +
+    'الأكواد في ورقة «' + CODES + '» والإجابات تنزل في «' + RESP + '».\n' +
     'الفورم: ' + (f.title || formUrl_()) + '\n' +
-    'عدد الأسئلة: ' + f.questions.filter(q => q.type !== 'عنوان').length + '\n\n' +
+    'عدد الأسئلة: ' + f.questions.filter(q => q.type !== 'عنوان' && !q.auto).length + '\n\n' +
     'الخطوة الجاية: ⚙️ تجهيز ← ٢) طريقة النشر', ui.ButtonSet.OK);
 }
 

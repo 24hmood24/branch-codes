@@ -85,7 +85,7 @@
     var api = decodeURIComponent(m[1]);
     if (/^https:\/\/script\.google\.com\/(a\/macros\/[^\/]+|macros)\/s\/[\w-]+\/exec$/.test(api)) C.API_URL = api;
   })();
-  var branches = [], questions = [], chosen = '';
+  var branches = [], questions = [], chosen = '', branchMatch = {};
   var $ = function (id) { return document.getElementById(id); };
 
   function setHead(t, d) {
@@ -123,6 +123,7 @@
   apiGet({ action: 'start' }).then(function (d) {
     branches = d.branches || [];
     questions = d.questions || [];
+    branchMatch = d.branchMatch || {};
     setHead(C.TITLE || d.title, C.SUBTITLE || d.description);
     $('search').disabled = false;
     $('search').placeholder = branches.length ? 'ابحث أو اختر الفرع' : 'ما فيه فروع حالياً';
@@ -215,6 +216,9 @@
         });
       } else if (q.type === 'فقرة') {
         el = document.createElement('textarea');
+      } else if (q.type === 'ملف') {
+        el = document.createElement('input');
+        el.type = 'file'; el.accept = 'image/*,application/pdf'; el.multiple = true;
       } else {
         el = document.createElement('input');
         el.type = { 'رقم': 'number', 'جوال': 'tel', 'بريد': 'email', 'تاريخ': 'date', 'وقت': 'time' }[q.type] || 'text';
@@ -222,6 +226,9 @@
         if (q.type === 'بريد') { el.dir = 'ltr'; }
       }
       el.id = 'f' + i;
+      if (q.auto === 'branch' && branchMatch[chosen]) {
+        Array.prototype.forEach.call(el.querySelectorAll('input'), function (x) { if (x.value === branchMatch[chosen]) x.checked = true; });
+      }
       card.appendChild(el);
       var er = document.createElement('div'); er.className = 'err'; er.id = 'e' + i; card.appendChild(er);
       box.appendChild(card);
@@ -237,7 +244,33 @@
       return Array.prototype.map.call(document.querySelectorAll('input[name="q' + i + '"]:checked'),
         function (x) { return x.value; }).join('، ');
     }
+    if (q.type === 'ملف') return Array.prototype.slice.call($('f' + i).files || [], 0, 5);
     return $('f' + i).value.trim();
+  }
+
+  // الصور تصغر قبل الإرسال (أطول ضلع 1600px) عشان ترفع بسرعة
+  function readFile(f) {
+    return new Promise(function (ok, no) {
+      var rd = new FileReader();
+      rd.onerror = function () { no(new Error('تعذّر قراءة الملف')); };
+      if (!/^image\//.test(f.type) || f.type === 'image/gif') {
+        rd.onload = function () { ok({ name: f.name, type: f.type, data: String(rd.result).split(',')[1] }); };
+        rd.readAsDataURL(f); return;
+      }
+      rd.onload = function () {
+        var img = new Image();
+        img.onerror = function () { ok({ name: f.name, type: f.type, data: String(rd.result).split(',')[1] }); };
+        img.onload = function () {
+          var k = Math.min(1, 1600 / Math.max(img.width, img.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          ok({ name: f.name, type: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] });
+        };
+        img.src = rd.result;
+      };
+      rd.readAsDataURL(f);
+    });
   }
 
   function send() {
@@ -245,6 +278,10 @@
     questions.forEach(function (q, i) {
       if (q.type === 'عنوان') return;
       var v = val(q, i); answers[q.id] = v; $('e' + i).textContent = '';
+      if (q.type === 'ملف') {
+        if (q.required && !v.length) { $('e' + i).textContent = 'هذا السؤال مطلوب'; ok = false; }
+        return;
+      }
       if (q.required && !v) { $('e' + i).textContent = 'هذا السؤال مطلوب'; ok = false; }
       else if (v && q.type === 'جوال' && !/^\+?[0-9\s]{8,15}$/.test(v)) { $('e' + i).textContent = 'رقم الجوال غير صحيح'; ok = false; }
       else if (v && q.type === 'بريد' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { $('e' + i).textContent = 'البريد غير صحيح'; ok = false; }
@@ -252,7 +289,13 @@
     if (!ok) { $('err2').textContent = 'فيه أسئلة ناقصة'; return; }
     $('err2').textContent = '';
     $('sendBtn').disabled = true; $('sendBtn').textContent = '...';
-    apiPost({ action: 'submit', branch: chosen, answers: answers }).then(function () {
+    var jobs = questions.map(function (q) {
+      if (q.type !== 'ملف') return null;
+      return Promise.all(answers[q.id].map(readFile)).then(function (arr) { answers[q.id] = arr; });
+    }).filter(Boolean);
+    Promise.all(jobs).then(function () {
+      return apiPost({ action: 'submit', branch: chosen, answers: answers });
+    }).then(function () {
       $('step2').classList.add('hide'); $('step3').classList.remove('hide'); window.scrollTo(0, 0);
     }).catch(function (e) {
       $('err2').textContent = netErr(e);
